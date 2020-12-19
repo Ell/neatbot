@@ -15,7 +15,7 @@ pub struct ServerConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
-    pub ssl: Option<bool>,
+    pub ssl: bool,
     pub nicknames: Option<Vec<String>>,
     pub plugin_whitelist: Option<Vec<String>>,
     pub plugin_blacklist: Option<Vec<String>>,
