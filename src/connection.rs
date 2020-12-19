@@ -11,6 +11,19 @@ use tokio::{
 use tokio_util::codec::{Framed, LinesCodec};
 
 #[derive(Debug)]
+pub enum Event {
+    IRC(String, Message),
+    Connection(String, ConnectionEvent),
+}
+
+#[derive(Debug)]
+pub enum ConnectionEvent {
+    Error(String),
+    Connected,
+    Disconnected,
+}
+
+#[derive(Debug)]
 pub struct ConnectionManager {
     connections: HashMap<String, Connection>,
     pub messages: SelectAll<Receiver<Event>>,
@@ -30,6 +43,12 @@ impl ConnectionManager {
         self.connections.insert(name.to_string(), connection);
     }
 
+    pub fn remove_connection(&mut self, name: &str) -> Result<()> {
+        if let Some(connection) = self.connections.get_mut(name) {}
+
+        Ok(())
+    }
+
     pub async fn start(&mut self) {
         for (_, v) in self.connections.iter_mut() {
             let event_stream = v.connect().await.unwrap();
@@ -37,19 +56,14 @@ impl ConnectionManager {
             self.messages.push(event_stream);
         }
     }
-}
 
-#[derive(Debug)]
-pub enum Event {
-    IRC(String, Message),
-    Connection(String, ConnectionEvent),
-}
+    pub async fn send_message(&mut self, name: &str, message: Message) -> Result<()> {
+        if let Some(connection) = self.connections.get_mut(name) {
+            connection.send_message(message).await?;
+        }
 
-#[derive(Debug)]
-pub enum ConnectionEvent {
-    Error(String),
-    Connected,
-    Disconnected,
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -84,17 +98,16 @@ impl Connection {
         let (mut sink, mut stream) =
             Framed::new(stream, LinesCodec::new_with_max_length(1024)).split();
 
-        event_tx
+        let _ = event_tx
             .send(Event::Connection(
                 self.name.clone(),
                 ConnectionEvent::Connected,
             ))
-            .await
-            .ok();
+            .await;
 
         tokio::spawn(async move {
             while let Some(message) = msg_rx.recv().await {
-                sink.send(message.to_string()).await.ok();
+                let _ = sink.send(message.to_string()).await;
             }
         });
 
@@ -105,19 +118,17 @@ impl Connection {
                 match result {
                     Ok(line) => {
                         let irc_message = Message::from(line);
-                        event_tx
+                        let _ = event_tx
                             .send(Event::IRC(connection_name.clone(), irc_message))
-                            .await
-                            .ok();
+                            .await;
                     }
                     Err(e) => {
-                        event_tx
+                        let _ = event_tx
                             .send(Event::Connection(
                                 connection_name.clone(),
                                 ConnectionEvent::Error(e.to_string()),
                             ))
-                            .await
-                            .ok();
+                            .await;
                     }
                 }
             }
@@ -132,6 +143,10 @@ impl Connection {
         });
 
         Ok(event_rx)
+    }
+
+    pub async fn disconnect(&mut self) -> Result<()> {
+        Ok(())
     }
 
     pub async fn send_message(&self, message: Message) -> Result<()> {

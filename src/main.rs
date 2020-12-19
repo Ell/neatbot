@@ -24,7 +24,7 @@ async fn main() {
     manager.start().await;
 
     while let Some(result) = manager.messages.next().await {
-        println!("{:?}", result);
+        println!("<< {:?}", result);
     }
 
     println!("{:?}", bot_config);
