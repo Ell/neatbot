@@ -1,160 +1,164 @@
 use anyhow::{anyhow, Result};
-use futures::StreamExt;
-use futures::{stream::SelectAll, SinkExt};
+use futures::{future::join_all, SinkExt, StreamExt};
 use irc_rust::Message;
-use std::collections::HashMap;
-use tokio::{
-    net::TcpStream,
-    sync::mpsc::{self, Receiver, Sender},
-};
-
+use tokio::sync::broadcast;
+use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::codec::{Framed, LinesCodec};
 
-#[derive(Debug)]
-pub enum Event {
-    IRC(String, Message),
-    Connection(String, ConnectionEvent),
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConnectionEvent {
-    Error(String),
     Connected,
     Disconnected,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum Event {
+    Connection(ConnectionEvent),
+    Message(Message),
+}
+
+#[derive(Debug, Clone)]
+pub enum ConnectionCommand {
+    Disconnect,
+    Reconnect,
+}
+
+#[derive(Debug, Clone)]
+pub enum Command {
+    Message(Message),
+    Connection(ConnectionCommand),
+    Startup,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaggedEvent {
+    pub name: String,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaggedCommand {
+    name: String,
+    command: Command,
+}
+
+#[derive(Debug, Default)]
 pub struct ConnectionManager {
-    connections: HashMap<String, Connection>,
-    pub messages: SelectAll<Receiver<Event>>,
+    connections: Vec<Connection>,
 }
 
 impl ConnectionManager {
     pub fn new() -> ConnectionManager {
         ConnectionManager {
-            connections: HashMap::new(),
-            messages: SelectAll::new(),
+            ..Default::default()
         }
     }
 
-    pub fn add_connection(&mut self, name: &str, host: &str, port: u16, ssl: bool) {
-        let connection = Connection::new(name, host, port, ssl);
+    pub fn add_server(&mut self, name: &str, host: &str, ssl: bool) -> Result<()> {
+        let connection = Connection::new(name, host, ssl);
 
-        self.connections.insert(name.to_string(), connection);
-    }
-
-    pub fn remove_connection(&mut self, name: &str) -> Result<()> {
-        if let Some(connection) = self.connections.get_mut(name) {}
+        self.connections.push(connection);
 
         Ok(())
     }
 
-    pub async fn start(&mut self) {
-        for (_, v) in self.connections.iter_mut() {
-            let event_stream = v.connect().await.unwrap();
+    pub async fn start(
+        &mut self,
+    ) -> Result<(
+        broadcast::Sender<TaggedCommand>,
+        mpsc::Receiver<TaggedEvent>,
+    )> {
+        let (event_tx, event_rx) = mpsc::channel::<TaggedEvent>(32);
+        let (command_tx, _) = broadcast::channel::<TaggedCommand>(32);
 
-            self.messages.push(event_stream);
+        for conn in &mut self.connections {
+            conn.connect(event_tx.clone(), command_tx.subscribe())
+                .await
+                .unwrap();
         }
-    }
 
-    pub async fn send_message(&mut self, name: &str, message: Message) -> Result<()> {
-        if let Some(connection) = self.connections.get_mut(name) {
-            connection.send_message(message).await?;
-        }
-
-        Ok(())
+        Ok((command_tx.clone(), event_rx))
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Connection {
     name: String,
     host: String,
     ssl: bool,
-    port: u16,
-    msg_tx: Option<Sender<Message>>,
 }
 
 impl Connection {
-    pub fn new(name: &str, host: &str, port: u16, ssl: bool) -> Connection {
+    pub fn new(name: &str, host: &str, ssl: bool) -> Connection {
         Self {
             name: name.to_string(),
             host: host.to_string(),
-            msg_tx: None,
             ssl,
-            port,
+            ..Default::default()
         }
     }
 
-    pub async fn connect(&mut self) -> Result<Receiver<Event>> {
-        let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(32);
-        let (event_tx, event_rx) = mpsc::channel::<Event>(32);
+    pub async fn connect(
+        &mut self,
+        event_tx: mpsc::Sender<TaggedEvent>,
+        mut command_rx: broadcast::Receiver<TaggedCommand>,
+    ) -> Result<()> {
+        let tcp_stream = TcpStream::connect(&self.host).await?;
 
-        self.msg_tx = Some(msg_tx);
+        let codec = LinesCodec::new_with_max_length(1024);
+        let (mut sink, mut stream) = Framed::new(tcp_stream, codec).split();
 
-        let host: String = self.host.clone() + ":" + &self.port.to_string();
-        let stream = TcpStream::connect(host).await.unwrap();
-
-        let (mut sink, mut stream) =
-            Framed::new(stream, LinesCodec::new_with_max_length(1024)).split();
-
-        let _ = event_tx
-            .send(Event::Connection(
-                self.name.clone(),
-                ConnectionEvent::Connected,
-            ))
-            .await;
+        let name = self.name.clone();
 
         tokio::spawn(async move {
-            while let Some(message) = msg_rx.recv().await {
-                let _ = sink.send(message.to_string()).await;
-            }
-        });
+            event_tx
+                .clone()
+                .send(TaggedEvent {
+                    name: name.clone(),
+                    event: Event::Connection(ConnectionEvent::Connected),
+                })
+                .await
+                .ok();
 
-        let connection_name = self.name.clone();
-
-        tokio::spawn(async move {
             while let Some(result) = stream.next().await {
-                match result {
-                    Ok(line) => {
-                        let irc_message = Message::from(line);
-                        let _ = event_tx
-                            .send(Event::IRC(connection_name.clone(), irc_message))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = event_tx
-                            .send(Event::Connection(
-                                connection_name.clone(),
-                                ConnectionEvent::Error(e.to_string()),
-                            ))
-                            .await;
-                    }
+                if let Ok(event) = result {
+                    let message = Message::from(event);
+
+                    let event = TaggedEvent {
+                        name: name.clone(),
+                        event: Event::Message(message),
+                    };
+
+                    event_tx.clone().send(event).await.ok();
                 }
             }
 
             event_tx
-                .send(Event::Connection(
-                    connection_name.clone(),
-                    ConnectionEvent::Disconnected,
-                ))
+                .clone()
+                .send(TaggedEvent {
+                    name: name.clone(),
+                    event: Event::Connection(ConnectionEvent::Disconnected),
+                })
                 .await
                 .ok();
         });
 
-        Ok(event_rx)
-    }
+        let conn_name = self.name.clone();
+        tokio::spawn(async move {
+            while let Ok(tagged_command) = command_rx.recv().await {
+                let name = tagged_command.name;
+                let command = tagged_command.command;
 
-    pub async fn disconnect(&mut self) -> Result<()> {
+                if conn_name == name {
+                    match command {
+                        Command::Message(message) => sink.send(message.to_string()).await.ok(),
+                        Command::Connection(_) => Some(()),
+                        Command::Startup => Some(()),
+                    };
+                };
+            }
+        });
+
         Ok(())
-    }
-
-    pub async fn send_message(&self, message: Message) -> Result<()> {
-        if let Some(msg_tx) = &self.msg_tx {
-            msg_tx.send(message).await?;
-            Ok(())
-        } else {
-            Err(anyhow!("Invalid Connection"))
-        }
     }
 }
