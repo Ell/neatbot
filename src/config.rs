@@ -1,4 +1,7 @@
-use std::fs::{self, File};
+use std::{
+    fs::{self, File},
+    path::PathBuf,
+};
 
 use anyhow::{anyhow, Result};
 use platform_dirs::AppDirs;
@@ -8,9 +11,10 @@ use toml;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub server: Vec<ServerConfig>,
+    pub plugin_locations: Vec<PathBuf>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ServerConfig {
     pub name: String,
     pub host: String,
@@ -22,7 +26,7 @@ pub struct ServerConfig {
     pub channel: Option<Vec<ChannelConfig>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChannelConfig {
     pub name: String,
     pub key: Option<String>,

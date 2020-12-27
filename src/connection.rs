@@ -1,9 +1,11 @@
-use anyhow::{anyhow, Result};
-use futures::{future::join_all, SinkExt, StreamExt};
+use anyhow::Result;
+use futures::{SinkExt, StreamExt};
 use irc_rust::Message;
 use tokio::sync::broadcast;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::codec::{Framed, LinesCodec};
+
+use crate::config::{Config, ServerConfig};
 
 #[derive(Debug, Clone)]
 pub enum ConnectionEvent {
@@ -38,8 +40,31 @@ pub struct TaggedEvent {
 
 #[derive(Debug, Clone)]
 pub struct TaggedCommand {
-    name: String,
-    command: Command,
+    pub name: String,
+    pub command: Command,
+}
+
+impl TaggedCommand {
+    pub fn new(server_name: &str, command: Command) -> Self {
+        Self {
+            name: server_name.to_string(),
+            command,
+        }
+    }
+
+    pub fn new_message(server_name: &str, message: Message) -> Self {
+        Self {
+            name: server_name.to_string(),
+            command: Command::Message(message),
+        }
+    }
+
+    pub fn new_connection(server_name: &str, connection: ConnectionCommand) -> Self {
+        Self {
+            name: server_name.to_string(),
+            command: Command::Connection(connection),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -48,14 +73,20 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new() -> ConnectionManager {
-        ConnectionManager {
+    pub fn new(config: &Config) -> Result<ConnectionManager> {
+        let mut manager = ConnectionManager {
             ..Default::default()
-        }
+        };
+
+        &config.server.iter().map(|c| manager.add_server(c));
+
+        Ok(manager)
     }
 
-    pub fn add_server(&mut self, name: &str, host: &str, ssl: bool) -> Result<()> {
-        let connection = Connection::new(name, host, ssl);
+    pub fn add_server(&mut self, config: &ServerConfig) -> Result<()> {
+        let host = config.host.clone() + ":" + &config.port.to_string();
+
+        let connection = Connection::new(&config.name, &host, config.ssl);
 
         self.connections.push(connection);
 
@@ -124,6 +155,8 @@ impl Connection {
                 if let Ok(event) = result {
                     let message = Message::from(event);
 
+                    println!("<< {:?}", message.clone());
+
                     let event = TaggedEvent {
                         name: name.clone(),
                         event: Event::Message(message),
@@ -151,7 +184,11 @@ impl Connection {
 
                 if conn_name == name {
                     match command {
-                        Command::Message(message) => sink.send(message.to_string()).await.ok(),
+                        Command::Message(message) => {
+                            println!(">> {:?}", message);
+
+                            sink.send(message.to_string()).await.ok()
+                        }
                         Command::Connection(_) => Some(()),
                         Command::Startup => Some(()),
                     };

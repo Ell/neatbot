@@ -9,13 +9,11 @@ anyhow = "1.0.35"
 thiserror = "1.0.22"
 tokio = { version = "0.3", features = ["full"] }
 tokio-util = { version = "0.5.1", features = ["codec"] }
-log = "0.4.11"
-cfg-if = "1.0.0"
 futures = "0.3.0"
 regex = "1.4.2"
-chrono = "0.4.19"
 toml = "0.5.7"
 irc-rust = "0.3"
 serde = { version = "1.0.118", features = ["derive"] }
 platform-dirs = "0.3.0"
 tokio-rustls = "0.21.1"
+mlua = { version = "0.4", features = ["lua54", "vendored"] }
